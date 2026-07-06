@@ -182,4 +182,115 @@ Status Table::Get(std::string_view user_key, SequenceNumber snapshot,
   return Get(lkey.internal_key(), value);
 }
 
+// ---------------------------------------------------------------------------
+// Full-table iterator (index walk + data blocks)
+// ---------------------------------------------------------------------------
+
+Table::Iterator::Iterator(const Table* table)
+    : table_(table),
+      index_iter_(table->index_block_.NewIterator(&table->icmp_)) {
+  assert(table_ != nullptr);
+}
+
+bool Table::Iterator::Valid() const {
+  return status_.ok() && data_iter_ != nullptr && data_iter_->Valid();
+}
+
+std::string_view Table::Iterator::key() const {
+  assert(Valid());
+  return data_iter_->key();
+}
+
+std::string_view Table::Iterator::value() const {
+  assert(Valid());
+  return data_iter_->value();
+}
+
+void Table::Iterator::InitDataBlock() {
+  data_iter_.reset();
+  data_block_.reset();
+  if (!status_.ok() || !index_iter_.Valid()) {
+    return;
+  }
+  if (!index_iter_.status().ok()) {
+    status_ = index_iter_.status();
+    return;
+  }
+
+  BlockHandle handle;
+  std::string_view enc = index_iter_.value();
+  Status st = handle.DecodeFrom(&enc);
+  if (!st.ok()) {
+    status_ = st;
+    return;
+  }
+
+  auto block = std::make_unique<Block>(std::string{});
+  st = table_->ReadBlock(handle, block.get());
+  if (!st.ok()) {
+    status_ = st;
+    return;
+  }
+  data_block_ = std::move(block);
+  data_iter_ = std::make_unique<Block::Iterator>(
+      data_block_->NewIterator(&table_->icmp_));
+  data_iter_->SeekToFirst();
+  if (!data_iter_->status().ok()) {
+    status_ = data_iter_->status();
+    data_iter_.reset();
+    data_block_.reset();
+  }
+}
+
+void Table::Iterator::SeekToFirst() {
+  status_ = Status::OK();
+  data_iter_.reset();
+  data_block_.reset();
+  index_iter_ = table_->index_block_.NewIterator(&table_->icmp_);
+  index_iter_.SeekToFirst();
+  if (!index_iter_.status().ok()) {
+    status_ = index_iter_.status();
+    return;
+  }
+  // Skip empty data blocks (should be rare).
+  while (index_iter_.Valid()) {
+    InitDataBlock();
+    if (!status_.ok()) {
+      return;
+    }
+    if (data_iter_ != nullptr && data_iter_->Valid()) {
+      return;
+    }
+    index_iter_.Next();
+  }
+}
+
+void Table::Iterator::Next() {
+  assert(Valid());
+  data_iter_->Next();
+  if (!data_iter_->status().ok()) {
+    status_ = data_iter_->status();
+    data_iter_.reset();
+    data_block_.reset();
+    return;
+  }
+  if (data_iter_->Valid()) {
+    return;
+  }
+  // Advance to next data block.
+  index_iter_.Next();
+  while (index_iter_.Valid()) {
+    InitDataBlock();
+    if (!status_.ok()) {
+      return;
+    }
+    if (data_iter_ != nullptr && data_iter_->Valid()) {
+      return;
+    }
+    index_iter_.Next();
+  }
+  data_iter_.reset();
+  data_block_.reset();
+}
+
 }  // namespace tinylsm

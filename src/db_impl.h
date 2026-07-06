@@ -1,8 +1,10 @@
 #pragma once
 
 // DBImpl: Open/LOCK, WAL+MemTable write path, multi-log WAL replay, Get,
-// immutable memtable freeze, single BG worker flush to L0 (design §2.4 / §10).
+// immutable memtable freeze, single BG worker flush to L0 + L0→L1 compaction
+// (design §2.4 / §6 / §10).
 
+#include "compaction.h"
 #include "internal_key.h"
 #include "memtable.h"
 #include "version_set.h"
@@ -20,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace tinylsm {
@@ -41,9 +44,12 @@ class DBImpl : public DB {
   Status Get(const ReadOptions& options, const std::string& key,
              std::string* value) override;
 
-  // ---- TEST hooks (educational recovery / flush matrix) ----
+  // ---- TEST hooks (educational recovery / flush / compaction matrix) ----
   // Wait until imm_ is null (flush applied or no imm). Returns false on bg_error_.
   bool TEST_WaitForFlush();
+  // Wait until no imm, no scheduled/running compaction, and L0 below trigger
+  // (or bg_error_). Returns false on bg_error_.
+  bool TEST_WaitForCompaction();
   // Force freeze of current mem if non-empty and imm_ is free; schedule flush.
   Status TEST_ForceFreeze();
   // Simulate process crash: abandon in-flight flush, do not LogAndApply, release LOCK.
@@ -54,6 +60,8 @@ class DBImpl : public DB {
   // If true, WriteLevel0Table fails immediately; sticky bg_error_ and imm_ retained
   // (production flush-IO failure path — must not hang BG / destructor).
   void TEST_SetFailFlushIO(bool v);
+  // If true, BG builds compaction output then skips LogAndApply (R6 orphan SST).
+  void TEST_SetFailBeforeCompactionApply(bool v);
   // Sticky BG error (empty if OK).
   Status TEST_BgError() const;
   bool TEST_HasImm() const;
@@ -62,6 +70,13 @@ class DBImpl : public DB {
   uint64_t TEST_PeekNextFileNumber() const;
   size_t TEST_MemApproximateMemoryUsage() const;
   int TEST_NumL0Files() const;
+  int TEST_NumL1Files() const;
+  // Hold a shared_ptr to the live Version (C3: reader across compaction).
+  std::shared_ptr<Version> TEST_CurrentVersion() const;
+  // Attempt to unlink SSTs whose FileMetaData is no longer referenced.
+  void TEST_PurgeObsoleteFiles();
+  // True if the given SST number currently exists on disk.
+  bool TEST_SstFileExists(uint64_t number) const;
 
  private:
   // Shared write path for Put (kTypeValue) and Delete (kTypeDeletion).
@@ -80,6 +95,10 @@ class DBImpl : public DB {
   // Schedule / wake BG worker. REQUIRES: mutex_ held.
   void MaybeScheduleFlushLocked();
 
+  // If L0 count >= trigger, set compaction_scheduled_ and wake BG.
+  // REQUIRES: mutex_ held.
+  void MaybeScheduleCompactionLocked();
+
   // BG worker main loop (§10.3).
   void BackgroundCall();
 
@@ -92,9 +111,22 @@ class DBImpl : public DB {
   // On success *meta is filled and file is durable at TableFileName.
   Status WriteLevel0Table(MemTable* imm, FileMetaData* meta);
 
+  // Run one L0→L1 compaction (Pick under lock; IO unlocked; apply under lock).
+  // REQUIRES: mutex_ held on entry; may unlock for IO.
+  void BackgroundCompaction(std::unique_lock<std::mutex>& lock);
+
   // After successful LogAndApply that advanced log_number: delete obsolete *.log.
   // REQUIRES: mutex_ held.
   void RemoveObsoleteLogsLocked(uint64_t old_log_number, uint64_t new_log_number);
+
+  // Register compaction/flush-obsolete FileMetaData for delayed unlink (C3).
+  // REQUIRES: mutex_ held. Tries immediate delete when use_count allows.
+  void NoteObsoleteFilesLocked(
+      const std::vector<std::shared_ptr<FileMetaData>>& files);
+
+  // Unlink SST files whose weak_ptr has expired (no Version still refs them).
+  // REQUIRES: mutex_ held.
+  void PurgeObsoleteFilesLocked();
 
   Status AcquireLock();
   Status MaybeCreateOrRecover();
@@ -151,14 +183,19 @@ class DBImpl : public DB {
   // BG worker state (under mutex_ except shutting_down_ read as atomic-ish via mutex).
   bool shutting_down_ = false;
   bool bg_working_ = false;
-  bool compaction_scheduled_ = false;  // reserved PR14; always false here
+  bool compaction_scheduled_ = false;
   bool bg_thread_started_ = false;
   std::thread bg_thread_;
+
+  // SST numbers awaiting unlink once no Version/FileMetaData shared_ptr remains.
+  // weak_ptr expires when the last Version that listed the file is dropped.
+  std::vector<std::pair<uint64_t, std::weak_ptr<FileMetaData>>> pending_obsolete_sst_;
 
   // TEST: abandon flush on shutdown / skip apply after SST write / fail SST IO.
   bool test_simulate_crash_ = false;
   bool test_fail_before_flush_apply_ = false;
   bool test_fail_flush_io_ = false;
+  bool test_fail_before_compaction_apply_ = false;
 };
 
 }  // namespace tinylsm

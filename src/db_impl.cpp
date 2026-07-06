@@ -5,6 +5,7 @@
 #include "tinylsm/filename.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -76,11 +77,15 @@ DBImpl::~DBImpl() {
     wal_.reset();
     mem_.reset();
     imm_.reset();
+    // Drop live Version so any FileMetaData only held via versions_ can expire.
+    // Purge only unlinks numbers in pending_obsolete_sst_ (compaction inputs),
+    // never live manifest files that were never registered as obsolete.
+    versions_.reset();
+    PurgeObsoleteFilesLocked();
   }
   if (db_lock_) {
     (void)env_->UnlockFile(std::move(db_lock_));
   }
-  versions_.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +98,29 @@ bool DBImpl::TEST_WaitForFlush() {
     background_work_finished_cv_.wait(lock);
   }
   return bg_error_.ok() && imm_ == nullptr;
+}
+
+bool DBImpl::TEST_WaitForCompaction() {
+  std::unique_lock<std::mutex> lock(mutex_);
+  auto still_busy = [this]() {
+    if (!bg_error_.ok() || shutting_down_) {
+      return false;
+    }
+    if (imm_ != nullptr || bg_working_ || compaction_scheduled_) {
+      return true;
+    }
+    auto v = versions_->current();
+    if (v && NeedsCompaction(*v, options_.l0_compaction_trigger)) {
+      return true;
+    }
+    return false;
+  };
+  while (still_busy()) {
+    // Wake BG in case NeedsCompaction but schedule bit not set.
+    MaybeScheduleCompactionLocked();
+    background_work_finished_cv_.wait_for(lock, std::chrono::milliseconds(50));
+  }
+  return bg_error_.ok();
 }
 
 Status DBImpl::TEST_ForceFreeze() {
@@ -152,6 +180,11 @@ void DBImpl::TEST_SetFailFlushIO(bool v) {
   test_fail_flush_io_ = v;
 }
 
+void DBImpl::TEST_SetFailBeforeCompactionApply(bool v) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  test_fail_before_compaction_apply_ = v;
+}
+
 Status DBImpl::TEST_BgError() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return bg_error_;
@@ -186,6 +219,26 @@ int DBImpl::TEST_NumL0Files() const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto v = versions_->current();
   return v ? static_cast<int>(v->NumFiles(0)) : 0;
+}
+
+int DBImpl::TEST_NumL1Files() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto v = versions_->current();
+  return v ? static_cast<int>(v->NumFiles(1)) : 0;
+}
+
+std::shared_ptr<Version> DBImpl::TEST_CurrentVersion() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return versions_->current();
+}
+
+void DBImpl::TEST_PurgeObsoleteFiles() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  PurgeObsoleteFilesLocked();
+}
+
+bool DBImpl::TEST_SstFileExists(uint64_t number) const {
+  return env_->FileExists(TableFileName(dbname_, number));
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +547,20 @@ void DBImpl::MaybeScheduleFlushLocked() {
   }
 }
 
+void DBImpl::MaybeScheduleCompactionLocked() {
+  if (!bg_error_.ok() || shutting_down_) {
+    return;
+  }
+  auto v = versions_->current();
+  if (v == nullptr) {
+    return;
+  }
+  if (NeedsCompaction(*v, options_.l0_compaction_trigger)) {
+    compaction_scheduled_ = true;
+    bg_cv_.notify_all();
+  }
+}
+
 bool DBImpl::HasBackgroundWorkLocked() const {
   // Sticky error: do not treat pending imm_ as runnable work — otherwise the
   // BG loop busy-spins holding mutex_ (deadlocks writers and ~DBImpl). Design
@@ -501,7 +568,46 @@ bool DBImpl::HasBackgroundWorkLocked() const {
   if (!bg_error_.ok()) {
     return bg_working_;
   }
+  // Also treat "needs compaction but not yet scheduled" as work so shutdown
+  // can still finish a pending L0→L1 after the last flush (optional; tests use
+  // explicit wait). Prefer scheduling bit for the wait predicate.
   return (imm_ != nullptr) || compaction_scheduled_ || bg_working_;
+}
+
+void DBImpl::NoteObsoleteFilesLocked(
+    const std::vector<std::shared_ptr<FileMetaData>>& files) {
+  for (const auto& f : files) {
+    if (f) {
+      pending_obsolete_sst_.emplace_back(f->number, f);
+    }
+  }
+  PurgeObsoleteFilesLocked();
+}
+
+void DBImpl::PurgeObsoleteFilesLocked() {
+  if (pending_obsolete_sst_.empty()) {
+    return;
+  }
+  std::vector<std::pair<uint64_t, std::weak_ptr<FileMetaData>>> still;
+  still.reserve(pending_obsolete_sst_.size());
+  for (auto& ent : pending_obsolete_sst_) {
+    const uint64_t number = ent.first;
+    // Expired weak_ptr ⇒ no shared_ptr (no Version) still references this meta.
+    if (ent.second.expired()) {
+      const std::string path = TableFileName(dbname_, number);
+      if (env_->FileExists(path)) {
+        Status s = env_->DeleteFile(path);
+        if (s.ok()) {
+          std::fprintf(stderr,
+                       "tinylsm: unlink obsolete sst=%llu\n",
+                       static_cast<unsigned long long>(number));
+        }
+      }
+    } else {
+      still.push_back(std::move(ent));
+    }
+  }
+  pending_obsolete_sst_ = std::move(still);
 }
 
 Status DBImpl::FreezeMemTableLocked() {
@@ -824,10 +930,21 @@ void DBImpl::BackgroundCall() {
       imm_log_number_ = 0;
       bg_working_ = false;
       background_work_finished_cv_.notify_all();
+      MaybeScheduleCompactionLocked();
+      PurgeObsoleteFilesLocked();
       continue;
     }
 
-    // No imm and no error: shutdown exit or wait for more work.
+    // Prefer flush over compaction. Run compaction when scheduled or needed.
+    if (compaction_scheduled_ ||
+        (versions_->current() &&
+         NeedsCompaction(*versions_->current(),
+                         options_.l0_compaction_trigger))) {
+      BackgroundCompaction(lock);
+      continue;
+    }
+
+    // No imm / compaction and no error: shutdown exit or wait for more work.
     if (shutting_down_) {
       bg_working_ = false;
       break;
@@ -835,6 +952,127 @@ void DBImpl::BackgroundCall() {
     // Spurious wake / no runnable work: wait (always releases mutex_).
     bg_cv_.wait(lock);
   }
+}
+
+void DBImpl::BackgroundCompaction(std::unique_lock<std::mutex>& lock) {
+  // REQUIRES: mutex_ held. Prefer caller already checked needs/scheduled.
+  compaction_scheduled_ = false;
+
+  if (!bg_error_.ok() || versions_->current() == nullptr) {
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    return;
+  }
+
+  CompactionInputs inputs =
+      PickCompaction(*versions_->current(), options_.l0_compaction_trigger);
+  if (inputs.empty()) {
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    return;
+  }
+
+  // Hold input metas across apply for obsolete-file bookkeeping (C3).
+  std::vector<std::shared_ptr<FileMetaData>> obsolete;
+  obsolete.reserve(inputs.level0.size() + inputs.level1.size());
+  for (const auto& f : inputs.level0) {
+    obsolete.push_back(f);
+  }
+  for (const auto& f : inputs.level1) {
+    obsolete.push_back(f);
+  }
+
+  FileMetaData output;
+  output.number = versions_->NewFileNumber();
+  const bool inject_skip_apply = test_fail_before_compaction_apply_;
+
+  bg_working_ = true;
+  lock.unlock();  // ---- compaction IO without mutex ----
+
+  bool wrote_output = false;
+  Status s = DoCompactionWork(env_, dbname_, options_, inputs, &output,
+                              &wrote_output);
+
+  lock.lock();
+  if (test_simulate_crash_) {
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    return;
+  }
+
+  if (!s.ok()) {
+    (void)env_->DeleteFile(TableFileName(dbname_, output.number));
+    (void)env_->DeleteFile(TableTempFileName(dbname_, output.number));
+    bg_error_ = s;
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    return;
+  }
+
+  if (inject_skip_apply) {
+    // R6: leave durable orphan output SST (if any); inputs remain in manifest.
+    std::fprintf(stderr,
+                 "tinylsm: TEST fail-before-compaction-apply orphan sst=%llu "
+                 "wrote=%d\n",
+                 static_cast<unsigned long long>(output.number),
+                 wrote_output ? 1 : 0);
+    test_fail_before_compaction_apply_ = false;
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    // Do not clear compaction need forever — L0 still over trigger; avoid
+    // tight loop by leaving scheduled false until next flush schedules again.
+    // Re-schedule so a later run can succeed if inject was one-shot.
+    MaybeScheduleCompactionLocked();
+    return;
+  }
+
+  VersionEdit edit;
+  for (const auto& f : inputs.level0) {
+    edit.DeleteFile(/*level=*/0, f->number);
+  }
+  for (const auto& f : inputs.level1) {
+    edit.DeleteFile(/*level=*/1, f->number);
+  }
+  if (wrote_output) {
+    edit.AddFile(/*level=*/1, output.number, output.file_size, output.smallest,
+                 output.largest);
+  }
+  // Compaction-only edit: do not change log_number (design §6).
+  edit.SetNextFileNumber(versions_->PeekNextFileNumber());
+  edit.SetLastSequence(last_sequence_);
+
+  s = versions_->LogAndApply(&edit);
+  if (!s.ok()) {
+    bg_error_ = s;
+    bg_working_ = false;
+    background_work_finished_cv_.notify_all();
+    return;
+  }
+
+  const size_t n_l0_in = inputs.level0.size();
+  const size_t n_l1_in = inputs.level1.size();
+  std::fprintf(stderr,
+               "tinylsm: compact L0->L1 out=%llu size=%llu l0_in=%zu l1_in=%zu "
+               "wrote=%d\n",
+               static_cast<unsigned long long>(output.number),
+               static_cast<unsigned long long>(output.file_size), n_l0_in,
+               n_l1_in, wrote_output ? 1 : 0);
+
+  // Inputs no longer in current Version; unlink when no reader holds them.
+  // Register weak_ptrs, then drop *all* job-local strong refs (obsolete vector
+  // and CompactionInputs) before Purge — otherwise weak_ptrs never expire in
+  // this function and the last compaction's inputs leak until a later purge
+  // or process exit (review Bug 1).
+  NoteObsoleteFilesLocked(obsolete);
+  obsolete.clear();
+  inputs.level0.clear();
+  inputs.level1.clear();
+  PurgeObsoleteFilesLocked();
+  bg_working_ = false;
+  background_work_finished_cv_.notify_all();
+  // Another compaction may still be needed if trigger still exceeded (unlikely
+  // after full L0 drain) or new flushes arrived.
+  MaybeScheduleCompactionLocked();
 }
 
 // ---------------------------------------------------------------------------
