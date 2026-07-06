@@ -1,14 +1,19 @@
 #include "table_builder.h"
 
 #include "block_format.h"
+#include "bloom.h"
+#include "internal_key.h"
 
 #include <cassert>
 #include <string>
 
 namespace tinylsm {
 
-TableBuilder::TableBuilder(WritableFile* file, size_t block_size)
-    : file_(file), block_size_(block_size) {
+TableBuilder::TableBuilder(WritableFile* file, size_t block_size,
+                           int bloom_bits_per_key)
+    : file_(file),
+      block_size_(block_size),
+      bloom_bits_per_key_(bloom_bits_per_key) {
   assert(file_ != nullptr);
   assert(block_size_ >= 1);
 }
@@ -25,6 +30,11 @@ void TableBuilder::Add(std::string_view internal_key, std::string_view value) {
     has_smallest_ = true;
   }
   last_key_.assign(internal_key.data(), internal_key.size());
+
+  if (bloom_bits_per_key_ > 0) {
+    const std::string_view ukey = ExtractUserKey(internal_key);
+    bloom_user_keys_.emplace_back(ukey.data(), ukey.size());
+  }
 
   data_block_.Add(internal_key, value);
   pending_empty_data_block_ = false;
@@ -95,6 +105,24 @@ Status TableBuilder::Finish(TableBuildStats* stats) {
     return status_;
   }
 
+  // Optional whole-table bloom filter block (before index; format.md §5).
+  BlockHandle filter_handle;  // (0,0) when disabled or no keys
+  if (bloom_bits_per_key_ > 0 && !bloom_user_keys_.empty()) {
+    std::vector<std::string_view> key_views;
+    key_views.reserve(bloom_user_keys_.size());
+    for (const auto& k : bloom_user_keys_) {
+      key_views.emplace_back(k);
+    }
+    const std::string filter =
+        CreateFilter(key_views, bloom_bits_per_key_);
+    if (!filter.empty()) {
+      WriteRawBlock(filter, &filter_handle);
+    }
+  }
+  if (!status_.ok()) {
+    return status_;
+  }
+
   // Index block (may be empty: zero entries, still valid restarts).
   BlockHandle index_handle;
   {
@@ -105,10 +133,10 @@ Status TableBuilder::Finish(TableBuildStats* stats) {
     return status_;
   }
 
-  // Footer: index handle, zero filter handle, padding 0, magic TINYLSM1.
+  // Footer: index handle, filter handle (0,0 if off), padding 0, magic TINYLSM1.
   Footer footer;
   footer.index_handle = index_handle;
-  // filter_handle left at (0,0)
+  footer.filter_handle = filter_handle;
   std::string footer_bytes = footer.Encode();
   assert(footer_bytes.size() == kFooterSize);
   status_ = file_->Append(footer_bytes);

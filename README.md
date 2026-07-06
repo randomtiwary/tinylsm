@@ -7,6 +7,21 @@ how production-style engines (LevelDB / RocksDB lineage) are put together:
 MemTable + WAL, SSTables, manifest/version set, recovery, and compaction — with
 an explicit focus on **correctness, clarity, and small reviewable changes**.
 
+## Features (v0.1)
+
+| Area | What you get |
+|------|----------------|
+| **API** | `DB::Open`, `Put`, `Get`, `Delete` over byte-string keys/values |
+| **MemTable** | Ordered skiplist; approximate flush by `Options::write_buffer_size` |
+| **WAL** | Framed records + CRC; multi-log recovery from manifest `log_number` |
+| **SSTables** | `TINYLSM1` footer; data + index blocks; mandatory block CRC trailers |
+| **Bloom (optional)** | Whole-table filter block when `Options::bloom_bits_per_key > 0` (e.g. 10); `filter_handle = 0` means off (old tables still open) |
+| **Versions** | MANIFEST / CURRENT; COW `VersionSet`; file metadata with key ranges |
+| **Recovery** | Replay every WAL with number ≥ manifest log number, ascending |
+| **Compaction** | Simple L0→L1 leveled strategy; tombstone drop at bottommost when covered |
+| **Concurrency** | Single `DBImpl::mutex_`; SST IO off-lock via held `Version` refs; TSan CI job |
+| **Env** | POSIX `pread`/files (no mmap in v1); directory `LOCK` |
+
 ## Goals
 
 - Implement a minimal but complete educational LSM path: `Put` / `Get` / `Delete`
@@ -23,6 +38,7 @@ an explicit focus on **correctness, clarity, and small reviewable changes**.
   compression stacks, etc.)
 - Peak throughput tuning as a primary success metric
 - Copying or depending on other personal LSM experiments; this tree is greenfield
+- Public range `Iterator` API in v0.1 (internal iterators exist for flush/compaction)
 
 ## Build
 
@@ -33,9 +49,10 @@ cmake -S . -B build
 cmake --build build
 ```
 
-This produces a static library target `tinylsm`. Unit tests are built by default
-when tinylsm is the top-level project (`TINYLSM_BUILD_TESTS`; pass
-`-DTINYLSM_BUILD_TESTS=OFF` to skip).
+This produces a static library target `tinylsm`. Unit tests and the
+`examples/simple_put_get` binary are built by default when tinylsm is the
+top-level project (`TINYLSM_BUILD_TESTS` / `TINYLSM_BUILD_EXAMPLES`; pass
+`OFF` to skip either).
 
 ```bash
 # CMake 3.20+:
@@ -43,6 +60,15 @@ ctest --test-dir build --output-on-failure
 # CMake 3.16–3.19:
 cd build && ctest --output-on-failure
 ```
+
+### Example
+
+```bash
+./build/examples/simple_put_get /tmp/tinylsm-demo
+```
+
+See [`examples/simple_put_get.cpp`](examples/simple_put_get.cpp) for a minimal
+Open / Put / Get / Delete main linked against `tinylsm`.
 
 ### ThreadSanitizer
 
@@ -68,16 +94,26 @@ clean runs with **no** TSan suppressions. On a local host that prints
 ```
 tinylsm/
   CMakeLists.txt
-  include/tinylsm/   # public headers
-  src/               # library sources
-  tests/             # GoogleTest smoke / unit tests
-  docs/              # on-disk format freeze (see format.md)
-  .github/workflows/ # CI (build + ctest on Ubuntu)
+  include/tinylsm/   # public headers (db, options, status, env, …)
+  src/               # library sources (table, bloom, memtable, WAL, …)
+  tests/             # GoogleTest unit / stress tests
+  examples/          # minimal programs linking tinylsm
+  docs/              # design + on-disk format + concurrency
+  .github/workflows/ # CI (build + ctest + TSan on Ubuntu)
   README.md
   LICENSE
 ```
 
-**On-disk formats:** see [docs/format.md](docs/format.md) (WAL, SST/`TINYLSM1`, MANIFEST/CURRENT).
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [docs/design.md](docs/design.md) | Full design: architecture, PR plan, recovery, locking, formats |
+| [docs/format.md](docs/format.md) | Normative on-disk layouts (WAL, SST/`TINYLSM1`, MANIFEST/CURRENT) |
+| [docs/concurrency.md](docs/concurrency.md) | Lock protocol, version refs, TSan policy |
+
+**On-disk formats:** bloom uses a non-zero `filter_handle` without changing the
+`TINYLSM1` magic; zero handle means “no filter”.
 
 ## License
 

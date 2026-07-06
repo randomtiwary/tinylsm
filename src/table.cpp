@@ -1,6 +1,7 @@
 #include "table.h"
 
 #include "block_format.h"
+#include "bloom.h"
 #include "tinylsm/coding.h"
 
 #include <cassert>
@@ -9,11 +10,12 @@
 namespace tinylsm {
 
 Table::Table(RandomAccessFile* file, uint64_t file_size, Footer footer,
-             Block index_block)
+             Block index_block, std::string filter)
     : file_(file),
       file_size_(file_size),
       footer_(footer),
-      index_block_(std::move(index_block)) {}
+      index_block_(std::move(index_block)),
+      filter_(std::move(filter)) {}
 
 Status Table::Open(RandomAccessFile* file, uint64_t file_size,
                    std::unique_ptr<Table>* table) {
@@ -65,7 +67,37 @@ Status Table::Open(RandomAccessFile* file, uint64_t file_size,
     return index_block.status();
   }
 
-  table->reset(new Table(file, file_size, footer, std::move(index_block)));
+  // Optional bloom filter block (handle 0,0 = off; existing tables work).
+  std::string filter;
+  const BlockHandle& fh = footer.filter_handle;
+  const bool filter_present = (fh.offset != 0 || fh.size != 0);
+  if (filter_present) {
+    if (fh.size > file_size || fh.offset > file_size ||
+        fh.offset + fh.size + kBlockTrailerSize > file_size) {
+      return Status::Corruption("filter handle out of file bounds");
+    }
+    const size_t filter_total =
+        static_cast<size_t>(fh.size) + kBlockTrailerSize;
+    std::string filter_raw;
+    s = file->Read(fh.offset, filter_total, &filter_raw);
+    if (!s.ok()) {
+      return s;
+    }
+    if (filter_raw.size() != filter_total) {
+      return Status::Corruption("short read of filter block");
+    }
+    // Bloom payload is raw block_contents (bitmap || k), not restart-array
+    // entry encoding — only verify the trailer CRC, then keep contents bytes.
+    std::string_view filter_contents;
+    s = VerifyBlockTrailer(filter_raw, &filter_contents);
+    if (!s.ok()) {
+      return s;
+    }
+    filter.assign(filter_contents.data(), filter_contents.size());
+  }
+
+  table->reset(
+      new Table(file, file_size, footer, std::move(index_block), std::move(filter)));
   return Status::OK();
 }
 
@@ -98,6 +130,14 @@ bool Table::Get(std::string_view internal_key, std::string* value,
   if (internal_key.size() < 8) {
     *s = Status::Corruption("Get: internal key too short");
     return true;  // hard error: stop layered search
+  }
+
+  const std::string_view want_user = ExtractUserKey(internal_key);
+
+  // Bloom: if definitely not present, skip data block IO entirely.
+  if (!filter_.empty() && !KeyMayMatch(want_user, filter_)) {
+    *s = Status::NotFound("key not found (bloom)");
+    return false;
   }
 
   // 1) Find data block via index: first index key >= target (last key of block).
@@ -145,7 +185,6 @@ bool Table::Get(std::string_view internal_key, std::string* value,
     *s = Status::Corruption("SST entry key too short");
     return true;
   }
-  const std::string_view want_user = ExtractUserKey(internal_key);
   const std::string_view found_user = ExtractUserKey(found_key);
   if (want_user != found_user) {
     *s = Status::NotFound("key not found");
