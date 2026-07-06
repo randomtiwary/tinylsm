@@ -22,6 +22,8 @@ configure_file(
 
 add_library(tinylsm STATIC
   src/version.cpp
+  src/status.cpp
+  src/crc32c.cpp
 )
 
 target_include_directories(tinylsm
@@ -33,3 +35,13 @@ target_include_directories(tinylsm
 )
 
 target_compile_features(tinylsm PUBLIC cxx_std_17)
+
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
+else()
+  option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" OFF)
+endif()
+if(TINYLSM_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
