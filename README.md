@@ -13,7 +13,7 @@ an explicit focus on **correctness, clarity, and small reviewable changes**.
   over byte-string keys and values
 - Prefer clear code and well-specified on-disk formats over micro-optimizations
 - Make concurrency and durability learnable: locking model, WAL recovery, version
-  publication, and tests that catch real bugs (including ThreadSanitizer later)
+  publication, and tests that catch real bugs (including ThreadSanitizer in CI)
 - Build incrementally with small PRs so each piece is reviewable
 
 ## Non-goals
@@ -43,6 +43,25 @@ ctest --test-dir build --output-on-failure
 # CMake 3.16–3.19:
 cd build && ctest --output-on-failure
 ```
+
+### ThreadSanitizer
+
+For race detection (GCC/Clang), use a dedicated build with `TINYLSM_TSAN=ON`
+(`-fsanitize=thread -g -O1`). Concurrent stress defaults are CI-friendly; shorten
+further for a quick local check:
+
+```bash
+cmake -S . -B build-tsan -DTINYLSM_TSAN=ON
+cmake --build build-tsan
+TINYLSM_STRESS_THREADS=4 TINYLSM_STRESS_SECONDS=5 \
+  ctest --test-dir build-tsan -R Concurrent --output-on-failure
+```
+
+CI runs a full `ctest` under TSan with the same short stress env (and lowers
+`vm.mmap_rnd_bits` so TSan’s shadow mapping works on modern kernels). Goal:
+clean runs with **no** TSan suppressions. On a local host that prints
+`unexpected memory mapping`, try
+`sudo sysctl vm.mmap_rnd_bits=28` or run tests under `setarch $(uname -m) -R`.
 
 ## Layout
 
