@@ -48,10 +48,12 @@ class MemTable {
   void Add(SequenceNumber sequence, ValueType type, std::string_view key,
            std::string_view value);
 
-  // If memtable contains a value for key.user_key() visible at the lookup
-  // sequence, stores it in *value and returns OK.
-  // If the newest visible entry is a deletion, or no entry exists: NotFound.
-  Status Get(const LookupKey& key, std::string* value) const;
+  // Layered Get semantics (critical for delete visibility):
+  //   true  — newest visible entry for user_key is in this memtable.
+  //           *s == OK and *value set for kTypeValue;
+  //           *s == NotFound for kTypeDeletion (must NOT search older layers).
+  //   false — user_key absent here; caller may fall through to imm/SST.
+  bool Get(const LookupKey& key, std::string* value, Status* s) const;
 
   // Approximate memory used by this memtable (entries + skiplist overhead).
   size_t ApproximateMemoryUsage() const { return approx_memory_usage_; }
