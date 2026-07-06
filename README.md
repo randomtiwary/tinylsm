@@ -33,7 +33,16 @@ cmake -S . -B build
 cmake --build build
 ```
 
-This produces a static library target `tinylsm`.
+This produces a static library target `tinylsm`. Unit tests are built by default
+when tinylsm is the top-level project (`TINYLSM_BUILD_TESTS`; pass
+`-DTINYLSM_BUILD_TESTS=OFF` to skip).
+
+```bash
+# CMake 3.20+:
+ctest --test-dir build --output-on-failure
+# CMake 3.16–3.19:
+cd build && ctest --output-on-failure
+```
 
 ## Layout
 
@@ -42,10 +51,12 @@ tinylsm/
   CMakeLists.txt
   include/tinylsm/   # public headers
   src/               # library sources
-  tests/             # (added in later PRs)
+  tests/             # GoogleTest smoke / unit tests
+  .github/workflows/ # CI (build + ctest on Ubuntu)
   README.md
   LICENSE
 ```
+
 
 ## License
 
