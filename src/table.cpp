@@ -91,66 +91,89 @@ Status Table::ReadBlock(const BlockHandle& handle, Block* out) const {
   return Status::OK();
 }
 
-Status Table::Get(std::string_view internal_key, std::string* value) const {
+bool Table::Get(std::string_view internal_key, std::string* value,
+                Status* s) const {
   assert(value != nullptr);
+  assert(s != nullptr);
   if (internal_key.size() < 8) {
-    return Status::Corruption("Get: internal key too short");
+    *s = Status::Corruption("Get: internal key too short");
+    return true;  // hard error: stop layered search
   }
 
   // 1) Find data block via index: first index key >= target (last key of block).
   auto index_it = index_block_.NewIterator(&icmp_);
   index_it.Seek(internal_key);
   if (!index_it.status().ok()) {
-    return index_it.status();
+    *s = index_it.status();
+    return true;
   }
   if (!index_it.Valid()) {
-    return Status::NotFound("key not found");
+    *s = Status::NotFound("key not found");
+    return false;
   }
 
   BlockHandle data_handle;
   std::string_view handle_enc = index_it.value();
-  Status s = data_handle.DecodeFrom(&handle_enc);
-  if (!s.ok()) {
-    return s;
+  Status st = data_handle.DecodeFrom(&handle_enc);
+  if (!st.ok()) {
+    *s = st;
+    return true;
   }
 
   // 2) Load data block (CRC verified) and seek.
   Block data_block{std::string{}};
-  s = ReadBlock(data_handle, &data_block);
-  if (!s.ok()) {
-    return s;
+  st = ReadBlock(data_handle, &data_block);
+  if (!st.ok()) {
+    *s = st;
+    return true;
   }
 
   auto data_it = data_block.NewIterator(&icmp_);
   data_it.Seek(internal_key);
   if (!data_it.status().ok()) {
-    return data_it.status();
+    *s = data_it.status();
+    return true;
   }
   if (!data_it.Valid()) {
-    return Status::NotFound("key not found");
+    *s = Status::NotFound("key not found");
+    return false;
   }
 
   // 3) Same user key? Apply value / deletion (format.md §3.3 LookupKey semantics).
   const std::string_view found_key = data_it.key();
   if (found_key.size() < 8) {
-    return Status::Corruption("SST entry key too short");
+    *s = Status::Corruption("SST entry key too short");
+    return true;
   }
   const std::string_view want_user = ExtractUserKey(internal_key);
   const std::string_view found_user = ExtractUserKey(found_key);
   if (want_user != found_user) {
-    return Status::NotFound("key not found");
+    *s = Status::NotFound("key not found");
+    return false;
   }
 
   const ValueType type = ExtractValueType(found_key);
   if (type == kTypeDeletion) {
-    return Status::NotFound("deleted");
+    // Tombstone in this SST: stop older files (L0 reverse / L1) from resurrecting.
+    *s = Status::NotFound("deleted");
+    return true;
   }
   if (type != kTypeValue) {
-    return Status::Corruption("unknown value type in SST");
+    *s = Status::Corruption("unknown value type in SST");
+    return true;
   }
 
   value->assign(data_it.value().data(), data_it.value().size());
-  return Status::OK();
+  *s = Status::OK();
+  return true;
+}
+
+Status Table::Get(std::string_view internal_key, std::string* value) const {
+  Status s;
+  if (Get(internal_key, value, &s)) {
+    return s;
+  }
+  return Status::NotFound("key not found");
 }
 
 Status Table::Get(std::string_view user_key, SequenceNumber snapshot,

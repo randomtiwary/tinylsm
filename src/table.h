@@ -26,14 +26,18 @@ class Table {
   Table(const Table&) = delete;
   Table& operator=(const Table&) = delete;
 
-  // Look up using a full internal key (typically LookupKey::internal_key()).
-  // Returns:
-  //   OK + *value set  — found a kTypeValue for the same user key
-  //   NotFound         — missing, or newest visible entry is a deletion
-  //   Corruption       — bad block / key layout
+  // Layered Get (same contract as MemTable::Get):
+  //   true  — this SST has a definitive entry for the user key;
+  //           *s is OK (value) or NotFound (deletion tombstone — stop older files).
+  //   false — user key not present in this file (*s is NotFound, or error in *s).
+  // On Corruption/IO error: returns true with *s set so callers stop the search.
+  bool Get(std::string_view internal_key, std::string* value, Status* s) const;
+
+  // Convenience wrappers that collapse to a single Status (tests / simple callers).
+  // Deletion and missing both appear as NotFound (use bool form for layered Get).
   Status Get(std::string_view internal_key, std::string* value) const;
 
-  // Convenience: build LookupKey(user_key, snapshot) and call Get.
+  // Convenience: build LookupKey(user_key, snapshot) and call Status Get.
   Status Get(std::string_view user_key, SequenceNumber snapshot,
              std::string* value) const;
 
