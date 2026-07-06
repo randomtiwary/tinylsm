@@ -31,6 +31,7 @@ add_library(tinylsm STATIC
   src/version.cpp
   src/version_edit.cpp
   src/version_set.cpp
+  src/wal.cpp
 )
 
 target_include_directories(tinylsm
