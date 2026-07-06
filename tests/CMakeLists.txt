@@ -18,7 +18,13 @@ include(GoogleTest)
 function(tinylsm_add_test name)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE tinylsm GTest::gtest_main)
-  gtest_discover_tests(${name})
+  # PRE_TEST: avoid running TSan binaries at build time (ASLR/mapping issues on
+  # some hosts break POST_BUILD discovery before the test step can apply workarounds).
+  if(TINYLSM_TSAN)
+    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+  else()
+    gtest_discover_tests(${name})
+  endif()
 endfunction()
 
 tinylsm_add_test(smoke_test)

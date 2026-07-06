@@ -19,3 +19,26 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # ThreadSanitizer on concurrent stress (short config for CI wall time).
+  # Zero suppressions: real races must be fixed in engine code.
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux 6.6+ high-entropy ASLR breaks TSan mappings on Ubuntu runners.
+      - name: Tune ASLR for TSan
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure (TSan)
+        run: cmake -S . -B build-tsan -DTINYLSM_TSAN=ON
+
+      - name: Build
+        run: cmake --build build-tsan --parallel
+
+      - name: Test (TSan, short stress)
+        env:
+          TINYLSM_STRESS_THREADS: "4"
+          TINYLSM_STRESS_SECONDS: "5"
+        run: ctest --test-dir build-tsan --output-on-failure
