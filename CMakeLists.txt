@@ -20,6 +20,7 @@ configure_file(
 add_library(tinylsm STATIC
   src/block.cpp
   src/block_builder.cpp
+  src/bloom.cpp
   src/compaction.cpp
   src/crc32c.cpp
   src/db_impl.cpp
@@ -64,10 +65,15 @@ endif()
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
+  option(TINYLSM_BUILD_EXAMPLES "Build tinylsm example programs" ON)
 else()
   option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" OFF)
+  option(TINYLSM_BUILD_EXAMPLES "Build tinylsm example programs" OFF)
 endif()
 if(TINYLSM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+if(TINYLSM_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()

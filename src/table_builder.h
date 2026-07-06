@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace tinylsm {
 
@@ -19,8 +20,11 @@ class TableBuilder {
  public:
   // Writes SST bytes to *file (not owned). block_size is the target for data
   // block_contents before flush (default 4 KiB).
+  // bloom_bits_per_key > 0 enables a whole-table bloom over user keys
+  // (filter block + non-zero filter_handle); 0 leaves filter off (handle 0,0).
   explicit TableBuilder(WritableFile* file,
-                        size_t block_size = kDefaultBlockSize);
+                        size_t block_size = kDefaultBlockSize,
+                        int bloom_bits_per_key = 0);
 
   TableBuilder(const TableBuilder&) = delete;
   TableBuilder& operator=(const TableBuilder&) = delete;
@@ -30,8 +34,8 @@ class TableBuilder {
   void Add(std::string_view internal_key, std::string_view value);
 
   // Flush remaining data block (or one empty data block if no keys), write
-  // index block + footer. *stats receives file size and key range.
-  // After Finish, further Add/Finish is invalid.
+  // optional filter block, index block + footer. *stats receives file size
+  // and key range. After Finish, further Add/Finish is invalid.
   Status Finish(TableBuildStats* stats);
 
   // Discard without writing a complete table. Further Add/Finish invalid.
@@ -53,6 +57,7 @@ class TableBuilder {
 
   WritableFile* file_;
   const size_t block_size_;
+  const int bloom_bits_per_key_;
   Status status_;
   uint64_t offset_ = 0;
   uint64_t num_entries_ = 0;
@@ -68,6 +73,9 @@ class TableBuilder {
   // True if the current data_block_ has received at least one key, or we need
   // an empty data block at Finish for a zero-key table.
   bool pending_empty_data_block_ = true;
+
+  // Owned user-key copies for bloom when enabled (avoids dangling views).
+  std::vector<std::string> bloom_user_keys_;
 };
 
 }  // namespace tinylsm
