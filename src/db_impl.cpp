@@ -77,11 +77,15 @@ DBImpl::~DBImpl() {
     wal_.reset();
     mem_.reset();
     imm_.reset();
+    // Drop live Version so any FileMetaData only held via versions_ can expire.
+    // Purge only unlinks numbers in pending_obsolete_sst_ (compaction inputs),
+    // never live manifest files that were never registered as obsolete.
+    versions_.reset();
+    PurgeObsoleteFilesLocked();
   }
   if (db_lock_) {
     (void)env_->UnlockFile(std::move(db_lock_));
   }
-  versions_.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,19 +1049,24 @@ void DBImpl::BackgroundCompaction(std::unique_lock<std::mutex>& lock) {
     return;
   }
 
+  const size_t n_l0_in = inputs.level0.size();
+  const size_t n_l1_in = inputs.level1.size();
   std::fprintf(stderr,
                "tinylsm: compact L0->L1 out=%llu size=%llu l0_in=%zu l1_in=%zu "
                "wrote=%d\n",
                static_cast<unsigned long long>(output.number),
-               static_cast<unsigned long long>(output.file_size),
-               inputs.level0.size(), inputs.level1.size(),
-               wrote_output ? 1 : 0);
+               static_cast<unsigned long long>(output.file_size), n_l0_in,
+               n_l1_in, wrote_output ? 1 : 0);
 
   // Inputs no longer in current Version; unlink when no reader holds them.
-  // Register weak_ptrs first, then drop our strong refs so Purge can see expiry
-  // when no Get-held Version still shares the FileMetaData.
+  // Register weak_ptrs, then drop *all* job-local strong refs (obsolete vector
+  // and CompactionInputs) before Purge — otherwise weak_ptrs never expire in
+  // this function and the last compaction's inputs leak until a later purge
+  // or process exit (review Bug 1).
   NoteObsoleteFilesLocked(obsolete);
   obsolete.clear();
+  inputs.level0.clear();
+  inputs.level1.clear();
   PurgeObsoleteFilesLocked();
   bg_working_ = false;
   background_work_finished_cv_.notify_all();

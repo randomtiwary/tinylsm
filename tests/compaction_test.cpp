@@ -12,6 +12,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -235,7 +237,9 @@ TEST_F(CompactionTest, AllTombstonesNoOutputFile) {
   delete db;
 }
 
-// R6: compaction output orphan if apply skipped; inputs remain; data correct.
+// R6: compaction output orphan if apply skipped; inputs remain during inject;
+// data correct; orphan ignored on reopen. Arm inject *before* the flush that
+// hits the L0 trigger so the first compact attempt is the skip-apply path.
 TEST_F(CompactionTest, R6_OrphanCompactionOutput) {
   tinylsm::Options opt = CompactionOptions(/*l0_trigger=*/2);
   tinylsm::DB* db = nullptr;
@@ -247,35 +251,171 @@ TEST_F(CompactionTest, R6_OrphanCompactionOutput) {
   ASSERT_TRUE(db->Put(wo, "k", "before").ok());
   ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
   ASSERT_TRUE(impl->TEST_WaitForFlush());
+  ASSERT_EQ(impl->TEST_NumL0Files(), 1);
+
+  // First compact attempt (after 2nd L0) will write then skip apply (one-shot).
+  impl->TEST_SetFailBeforeCompactionApply(true);
+
   ASSERT_TRUE(db->Put(wo, "k", "after").ok());
   ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
   ASSERT_TRUE(impl->TEST_WaitForFlush());
-
-  // Next compaction will write output then skip apply.
-  impl->TEST_SetFailBeforeCompactionApply(true);
-  // Ensure schedule and run once (inject clears itself).
+  // Inject then successful retry: Wait drains until L0 compacted for real.
   ASSERT_TRUE(impl->TEST_WaitForCompaction());
 
-  // Logical data still correct via live L0 inputs (apply skipped).
   std::string value;
   ASSERT_TRUE(db->Get(tinylsm::ReadOptions(), "k", &value).ok());
   EXPECT_EQ(value, "after");
+  EXPECT_EQ(impl->TEST_NumL0Files(), 0);
+  EXPECT_GE(impl->TEST_NumL1Files(), 1);
 
-  // Orphan may exist; reopen must still read correctly (orphan ignored).
-  const int sst_before_close = CountSstFiles();
-  EXPECT_GE(sst_before_close, 2);  // at least inputs; maybe orphan too
+  // Orphan from the skipped apply must still be on disk and not in the live
+  // Version (manifest ignores it). Live L1 is also present.
+  std::set<uint64_t> live;
+  {
+    auto v = impl->TEST_CurrentVersion();
+    ASSERT_NE(v, nullptr);
+    for (int lvl = 0; lvl < 2; ++lvl) {
+      for (const auto& f : v->LevelFiles(lvl)) {
+        live.insert(f->number);
+      }
+    }
+  }
+  std::vector<std::string> children;
+  ASSERT_TRUE(env_->GetChildren(dbname_, &children).ok());
+  int orphans = 0;
+  int live_on_disk = 0;
+  for (const auto& name : children) {
+    if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".sst") != 0) {
+      continue;
+    }
+    char* end = nullptr;
+    const uint64_t n = std::strtoull(name.c_str(), &end, 10);
+    if (end == name.c_str() || std::string(end) != ".sst") {
+      continue;
+    }
+    if (live.count(n)) {
+      ++live_on_disk;
+    } else {
+      ++orphans;
+    }
+  }
+  EXPECT_GE(live_on_disk, 1);
+  EXPECT_GE(orphans, 1) << "R6 skip-apply should leave an orphan SST on disk";
 
   delete db;
   db = nullptr;
   ASSERT_TRUE(tinylsm::DB::Open(opt, dbname_, &db).ok());
   ASSERT_TRUE(db->Get(tinylsm::ReadOptions(), "k", &value).ok());
   EXPECT_EQ(value, "after");
-
-  // Let a successful compaction run after reopen if L0 still high.
   AsImpl(db)->TEST_WaitForCompaction();
   ASSERT_TRUE(db->Get(tinylsm::ReadOptions(), "k", &value).ok());
   EXPECT_EQ(value, "after");
 
+  delete db;
+}
+
+// Happy-path unlink: after compact with no held Version, input SSTs are gone
+// immediately (does not rely on a later flush or explicit TEST_Purge).
+// Uses trigger=3 so we can snapshot two L0 numbers before the compacting flush.
+TEST_F(CompactionTest, ObsoleteInputsUnlinkedWithoutHeldVersion) {
+  tinylsm::Options opt = CompactionOptions(/*l0_trigger=*/3);
+  tinylsm::DB* db = nullptr;
+  ASSERT_TRUE(tinylsm::DB::Open(opt, dbname_, &db).ok());
+  auto* impl = AsImpl(db);
+  tinylsm::WriteOptions wo;
+  wo.sync = false;
+
+  // Two L0 files — below trigger, no compaction yet.
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_TRUE(db->Put(wo, "k", "v" + std::to_string(i)).ok());
+    ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
+    ASSERT_TRUE(impl->TEST_WaitForFlush());
+  }
+  ASSERT_EQ(impl->TEST_NumL0Files(), 2);
+  ASSERT_EQ(impl->TEST_NumL1Files(), 0);
+
+  std::vector<uint64_t> early_inputs;
+  {
+    auto snap = impl->TEST_CurrentVersion();
+    ASSERT_NE(snap, nullptr);
+    for (const auto& f : snap->LevelFiles(0)) {
+      early_inputs.push_back(f->number);
+      ASSERT_TRUE(impl->TEST_SstFileExists(f->number));
+    }
+  }  // no external Version hold
+  ASSERT_EQ(early_inputs.size(), 2u);
+
+  // Third L0 hits trigger; compact all three. No held Version across apply.
+  ASSERT_TRUE(db->Put(wo, "k", "v2").ok());
+  ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
+  ASSERT_TRUE(impl->TEST_WaitForFlush());
+  ASSERT_TRUE(impl->TEST_WaitForCompaction());
+
+  EXPECT_EQ(impl->TEST_NumL0Files(), 0);
+  EXPECT_GE(impl->TEST_NumL1Files(), 1);
+
+  // Job-local refs cleared before purge: pre-trigger inputs unlinked now
+  // without TEST_PurgeObsoleteFiles or a subsequent flush.
+  for (uint64_t n : early_inputs) {
+    EXPECT_FALSE(impl->TEST_SstFileExists(n))
+        << "input " << n
+        << " still on disk after compact with no held Version";
+  }
+
+  std::string value;
+  ASSERT_TRUE(db->Get(tinylsm::ReadOptions(), "k", &value).ok());
+  EXPECT_EQ(value, "v2");
+
+  delete db;
+}
+
+// Close after final compact must not leave obsolete inputs; live L1 survives.
+TEST_F(CompactionTest, ObsoleteInputsUnlinkedOnClose) {
+  tinylsm::Options opt = CompactionOptions(/*l0_trigger=*/2);
+  tinylsm::DB* db = nullptr;
+  ASSERT_TRUE(tinylsm::DB::Open(opt, dbname_, &db).ok());
+  auto* impl = AsImpl(db);
+  tinylsm::WriteOptions wo;
+  wo.sync = false;
+
+  ASSERT_TRUE(db->Put(wo, "x", "1").ok());
+  ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
+  ASSERT_TRUE(impl->TEST_WaitForFlush());
+  const uint64_t first_l0 = [&]() {
+    auto v = impl->TEST_CurrentVersion();
+    EXPECT_EQ(v->NumFiles(0), 1u);
+    return v->LevelFiles(0)[0]->number;
+  }();
+
+  ASSERT_TRUE(db->Put(wo, "x", "2").ok());
+  ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
+  ASSERT_TRUE(impl->TEST_WaitForFlush());
+  ASSERT_TRUE(impl->TEST_WaitForCompaction());
+
+  uint64_t live_l1 = 0;
+  {
+    auto v = impl->TEST_CurrentVersion();
+    ASSERT_NE(v, nullptr);
+    ASSERT_EQ(v->NumFiles(0), 0u);
+    ASSERT_GE(v->NumFiles(1), 1u);
+    live_l1 = v->LevelFiles(1)[0]->number;
+  }
+
+  // Happy path should already have unlinked first_l0; assert before close too.
+  EXPECT_FALSE(impl->TEST_SstFileExists(first_l0));
+  EXPECT_TRUE(impl->TEST_SstFileExists(live_l1));
+
+  delete db;
+  db = nullptr;
+
+  // After destructor purge: live L1 still on disk; obsolete input still gone.
+  EXPECT_FALSE(env_->FileExists(tinylsm::TableFileName(dbname_, first_l0)));
+  EXPECT_TRUE(env_->FileExists(tinylsm::TableFileName(dbname_, live_l1)));
+
+  ASSERT_TRUE(tinylsm::DB::Open(opt, dbname_, &db).ok());
+  std::string value;
+  ASSERT_TRUE(db->Get(tinylsm::ReadOptions(), "x", &value).ok());
+  EXPECT_EQ(value, "2");
   delete db;
 }
 
