@@ -52,11 +52,13 @@ tinylsm/
   include/tinylsm/   # public headers
   src/               # library sources
   tests/             # GoogleTest smoke / unit tests
+  docs/              # on-disk format freeze (see format.md)
   .github/workflows/ # CI (build + ctest on Ubuntu)
   README.md
   LICENSE
 ```
 
+**On-disk formats:** see [docs/format.md](docs/format.md) (WAL, SST/`TINYLSM1`, MANIFEST/CURRENT).
 
 ## License
 
