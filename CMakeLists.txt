@@ -24,11 +24,14 @@ add_library(tinylsm STATIC
   src/version.cpp
   src/status.cpp
   src/crc32c.cpp
+  src/internal_key.cpp
 )
 
 target_include_directories(tinylsm
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    # Internal headers (internal_key.h, …) available to in-tree dependents only.
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
