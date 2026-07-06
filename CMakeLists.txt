@@ -25,6 +25,8 @@ add_library(tinylsm STATIC
   src/status.cpp
   src/crc32c.cpp
   src/internal_key.cpp
+  src/block_builder.cpp
+  src/block.cpp
 )
 
 target_include_directories(tinylsm
