@@ -51,6 +51,11 @@ class DBImpl : public DB {
   void TEST_SimulateCrash();
   // If true, BG builds SST then fails before LogAndApply (leaves orphan SST + multi-log).
   void TEST_SetFailBeforeFlushApply(bool v);
+  // If true, WriteLevel0Table fails immediately; sticky bg_error_ and imm_ retained
+  // (production flush-IO failure path — must not hang BG / destructor).
+  void TEST_SetFailFlushIO(bool v);
+  // Sticky BG error (empty if OK).
+  Status TEST_BgError() const;
   bool TEST_HasImm() const;
   uint64_t TEST_CurrentLogNumber() const;
   uint64_t TEST_ManifestLogNumber() const;
@@ -78,7 +83,9 @@ class DBImpl : public DB {
   // BG worker main loop (§10.3).
   void BackgroundCall();
 
-  // has_work = imm || compaction_scheduled || bg_working (compaction unused in PR13).
+  // has_work for the BG run loop. Sticky bg_error_ means no further flush/compaction
+  // attempts count as work (imm may still be non-null for recovery; do not thrash).
+  // bg_working_ still counts so an in-flight claim can finish its error path.
   bool HasBackgroundWorkLocked() const;
 
   // Build L0 SST from imm memtable. Mutex must NOT be held (IO off-lock).
@@ -148,9 +155,10 @@ class DBImpl : public DB {
   bool bg_thread_started_ = false;
   std::thread bg_thread_;
 
-  // TEST: abandon flush on shutdown / skip apply after SST write.
+  // TEST: abandon flush on shutdown / skip apply after SST write / fail SST IO.
   bool test_simulate_crash_ = false;
   bool test_fail_before_flush_apply_ = false;
+  bool test_fail_flush_io_ = false;
 };
 
 }  // namespace tinylsm

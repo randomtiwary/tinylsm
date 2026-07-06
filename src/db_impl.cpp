@@ -147,6 +147,16 @@ void DBImpl::TEST_SetFailBeforeFlushApply(bool v) {
   test_fail_before_flush_apply_ = v;
 }
 
+void DBImpl::TEST_SetFailFlushIO(bool v) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  test_fail_flush_io_ = v;
+}
+
+Status DBImpl::TEST_BgError() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return bg_error_;
+}
+
 bool DBImpl::TEST_HasImm() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return imm_ != nullptr;
@@ -485,6 +495,12 @@ void DBImpl::MaybeScheduleFlushLocked() {
 }
 
 bool DBImpl::HasBackgroundWorkLocked() const {
+  // Sticky error: do not treat pending imm_ as runnable work — otherwise the
+  // BG loop busy-spins holding mutex_ (deadlocks writers and ~DBImpl). Design
+  // §10: fail writers/gets; leave WALs; idle until shutdown.
+  if (!bg_error_.ok()) {
+    return bg_working_;
+  }
   return (imm_ != nullptr) || compaction_scheduled_ || bg_working_;
 }
 
@@ -616,9 +632,7 @@ Status DBImpl::Delete(const WriteOptions& options, const std::string& key) {
 // ---------------------------------------------------------------------------
 
 Status DBImpl::WriteLevel0Table(MemTable* imm, FileMetaData* meta) {
-  // Allocate file number under... caller must pass number already, or we
-  // allocate here without mutex? Design: allocate under mutex before unlock.
-  // We receive meta->number pre-assigned by BG under lock.
+  // meta->number pre-assigned by BG under lock. Mutex must NOT be held (IO).
   const std::string tmp = TableTempFileName(dbname_, meta->number);
   const std::string final_path = TableFileName(dbname_, meta->number);
 
@@ -692,10 +706,13 @@ void DBImpl::RemoveObsoleteLogsLocked(uint64_t old_log_number,
 
 void DBImpl::BackgroundCall() {
   // §10.3 BGMain
+  //
+  // Lock protocol: hold mutex_ only for scheduling / version publish / flags.
+  // Never tight-loop while holding mutex_ (see sticky bg_error_ idle path).
   std::unique_lock<std::mutex> lock(mutex_);
   while (!shutting_down_ || HasBackgroundWorkLocked()) {
     while (!HasBackgroundWorkLocked() && !shutting_down_) {
-      bg_cv_.wait(lock);
+      bg_cv_.wait(lock);  // releases mutex_ while idle
     }
     if (shutting_down_ && !HasBackgroundWorkLocked()) {
       break;
@@ -704,23 +721,41 @@ void DBImpl::BackgroundCall() {
     // Crash simulation: abandon work without apply so multi-log remains.
     if (test_simulate_crash_) {
       bg_working_ = false;
+      background_work_finished_cv_.notify_all();
       break;
+    }
+
+    // Sticky bg_error_: stop flush attempts. imm_ may still be set (WALs hold
+    // data for recovery). Idle on cv until shutdown — do NOT spin on mutex_.
+    if (!bg_error_.ok()) {
+      bg_working_ = false;
+      background_work_finished_cv_.notify_all();
+      if (shutting_down_) {
+        break;
+      }
+      // Wait for shutdown signal (or a future clear-error policy). Releases mutex_.
+      bg_cv_.wait(lock);
+      continue;
     }
 
     // Prefer flush over compaction. On clean shutdown with imm_ pending and
     // no bg_error_, still run the flush to completion.
-    if (imm_ != nullptr && bg_error_.ok()) {
+    if (imm_ != nullptr) {
       std::shared_ptr<MemTable> imm = imm_;  // keep alive across unlock
       const uint64_t imm_log = imm_log_number_;
       (void)imm_log;
 
       FileMetaData meta;
       meta.number = versions_->NewFileNumber();
+      // Snapshot TEST inject under lock (WriteLevel0Table runs unlocked).
+      const bool inject_io_fail = test_fail_flush_io_;
 
       bg_working_ = true;
       lock.unlock();  // ---- SST IO without mutex ----
 
-      Status s = WriteLevel0Table(imm.get(), &meta);
+      Status s = inject_io_fail
+                     ? Status::IOError("TEST: injected WriteLevel0Table failure")
+                     : WriteLevel0Table(imm.get(), &meta);
 
       lock.lock();
       if (test_simulate_crash_) {
@@ -730,12 +765,14 @@ void DBImpl::BackgroundCall() {
       }
 
       if (!s.ok()) {
-        // Delete partial SST; leave WALs for recovery.
+        // Delete partial SST; leave WALs + imm_ for recovery; sticky error.
         (void)env_->DeleteFile(TableFileName(dbname_, meta.number));
         (void)env_->DeleteFile(TableTempFileName(dbname_, meta.number));
         bg_error_ = s;
         bg_working_ = false;
+        // Wake write-stall waiters so they observe bg_error_ and fail Put.
         background_work_finished_cv_.notify_all();
+        // Fall through to sticky-error idle path on next iteration (no spin).
         continue;
       }
 
@@ -769,6 +806,7 @@ void DBImpl::BackgroundCall() {
 
       s = versions_->LogAndApply(&edit);
       if (!s.ok()) {
+        // Retain imm_; sticky error; idle (same as WriteLevel0Table failure).
         bg_error_ = s;
         bg_working_ = false;
         background_work_finished_cv_.notify_all();
@@ -789,15 +827,13 @@ void DBImpl::BackgroundCall() {
       continue;
     }
 
-    // No flush work (or bg_error_ blocks further flush). If shutting down, exit.
+    // No imm and no error: shutdown exit or wait for more work.
     if (shutting_down_) {
       bg_working_ = false;
       break;
     }
-    // Spurious wake or only compaction (unused): wait again.
-    if (imm_ == nullptr) {
-      bg_cv_.wait(lock);
-    }
+    // Spurious wake / no runnable work: wait (always releases mutex_).
+    bg_cv_.wait(lock);
   }
 }
 

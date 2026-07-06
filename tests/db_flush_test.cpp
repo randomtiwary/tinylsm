@@ -222,4 +222,56 @@ TEST_F(DbFlushTest, DeleteInMemHidesSstValue) {
   EXPECT_TRUE(db->Get(ro, "k", &value).IsNotFound());
 }
 
+// CRITICAL regression: flush IO failure retains imm_ + sticky bg_error_.
+// BG must idle (not busy-spin holding mutex_); Put/Get fail with bg_error_;
+// destructor must join without hang.
+TEST_F(DbFlushTest, FlushIOFailureNoHangRetainsImm) {
+  tinylsm::DB* db = nullptr;
+  ASSERT_TRUE(tinylsm::DB::Open(SmallBufferOptions(400), dbname_, &db).ok());
+  auto* impl = AsImpl(db);
+
+  tinylsm::WriteOptions wo;
+  wo.sync = true;
+  ASSERT_TRUE(db->Put(wo, "before_fail", "v").ok());
+
+  // Inject real flush-path failure (unlike fail-before-apply, imm_ is retained).
+  impl->TEST_SetFailFlushIO(true);
+  ASSERT_TRUE(impl->TEST_ForceFreeze().ok());
+
+  // Wait until sticky error is observed (BG attempted flush and failed).
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (impl->TEST_BgError().ok() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_FALSE(impl->TEST_BgError().ok()) << "expected sticky bg_error_";
+  EXPECT_TRUE(impl->TEST_HasImm()) << "imm_ retained after flush IO failure";
+
+  // Writers and Gets must fail promptly with sticky error (no mutex hang).
+  tinylsm::Status put_s = db->Put(wo, "after_fail", "x");
+  EXPECT_FALSE(put_s.ok());
+  EXPECT_TRUE(put_s.IsIOError()) << put_s.ToString();
+
+  tinylsm::ReadOptions ro;
+  std::string value;
+  tinylsm::Status get_s = db->Get(ro, "before_fail", &value);
+  EXPECT_FALSE(get_s.ok());
+  EXPECT_TRUE(get_s.IsIOError()) << get_s.ToString();
+
+  // Destructor join must complete within a short timeout (no BG spin deadlock).
+  std::atomic<bool> deleted{false};
+  std::thread reaper([&]() {
+    delete db;
+    deleted.store(true);
+  });
+  const auto join_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!deleted.load() && std::chrono::steady_clock::now() < join_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(deleted.load()) << "destructor hung after flush failure (Bug 1)";
+  reaper.join();
+}
+
 }  // namespace
