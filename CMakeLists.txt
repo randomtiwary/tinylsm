@@ -27,6 +27,8 @@ add_library(tinylsm STATIC
   src/internal_key.cpp
   src/block_builder.cpp
   src/block.cpp
+  src/env_posix.cpp
+  src/filename.cpp
 )
 
 target_include_directories(tinylsm
