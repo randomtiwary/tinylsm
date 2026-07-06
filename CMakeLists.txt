@@ -33,3 +33,9 @@ target_include_directories(tinylsm
 )
 
 target_compile_features(tinylsm PUBLIC cxx_std_17)
+
+option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
+if(TINYLSM_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
