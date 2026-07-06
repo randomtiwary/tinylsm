@@ -1,0 +1,4 @@
+// Generated from cmake/tinylsm_version.h.in — do not edit by hand.
+#pragma once
+
+#define TINYLSM_VERSION_STRING "@PROJECT_VERSION@"

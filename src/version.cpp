@@ -1,7 +1,9 @@
 #include "tinylsm/version.h"
 
+#include "tinylsm_version.h"
+
 namespace tinylsm {
 
-const char* Version() { return "0.1.0"; }
+const char* Version() noexcept { return TINYLSM_VERSION_STRING; }
 
 }  // namespace tinylsm
