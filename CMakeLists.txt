@@ -22,6 +22,8 @@ configure_file(
 
 add_library(tinylsm STATIC
   src/version.cpp
+  src/status.cpp
+  src/crc32c.cpp
 )
 
 target_include_directories(tinylsm

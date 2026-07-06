@@ -14,8 +14,15 @@ set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(googletest)
 
-add_executable(smoke_test smoke_test.cpp)
-target_link_libraries(smoke_test PRIVATE tinylsm GTest::gtest_main)
-
 include(GoogleTest)
-gtest_discover_tests(smoke_test)
+
+function(tinylsm_add_test name)
+  add_executable(${name} ${name}.cpp)
+  target_link_libraries(${name} PRIVATE tinylsm GTest::gtest_main)
+  gtest_discover_tests(${name})
+endfunction()
+
+tinylsm_add_test(smoke_test)
+tinylsm_add_test(status_test)
+tinylsm_add_test(coding_test)
+tinylsm_add_test(crc32c_test)
