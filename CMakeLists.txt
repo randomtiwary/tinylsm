@@ -21,6 +21,7 @@ add_library(tinylsm STATIC
   src/block.cpp
   src/block_builder.cpp
   src/crc32c.cpp
+  src/db_impl.cpp
   src/env_posix.cpp
   src/filename.cpp
   src/internal_key.cpp
@@ -44,6 +45,9 @@ target_include_directories(tinylsm
 )
 
 target_compile_features(tinylsm PUBLIC cxx_std_17)
+
+find_package(Threads REQUIRED)
+target_link_libraries(tinylsm PUBLIC Threads::Threads)
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
