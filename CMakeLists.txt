@@ -26,6 +26,7 @@ add_library(tinylsm STATIC
   src/crc32c.cpp
   src/env_posix.cpp
   src/filename.cpp
+  src/wal.cpp
 )
 
 target_include_directories(tinylsm
@@ -34,6 +35,7 @@ target_include_directories(tinylsm
     $<INSTALL_INTERFACE:include>
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_compile_features(tinylsm PUBLIC cxx_std_17)

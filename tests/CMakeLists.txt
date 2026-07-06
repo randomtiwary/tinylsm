@@ -19,6 +19,8 @@ include(GoogleTest)
 function(tinylsm_add_test name)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE tinylsm GTest::gtest_main)
+  # Internal component headers (e.g. wal.h) live under src/.
+  target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/src)
   gtest_discover_tests(${name})
 endfunction()
 
@@ -28,3 +30,4 @@ tinylsm_add_test(coding_test)
 tinylsm_add_test(crc32c_test)
 tinylsm_add_test(env_test)
 tinylsm_add_test(filename_test)
+tinylsm_add_test(wal_test)
