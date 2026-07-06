@@ -41,6 +41,38 @@ class Table {
   Status Get(std::string_view user_key, SequenceNumber snapshot,
              std::string* value) const;
 
+  // Full-table iterator in internal-key order (for flush/compaction merge).
+  // key()/value() views are valid until Next/SeekToFirst; backed by the
+  // current data block owned by the iterator.
+  class Iterator {
+   public:
+    explicit Iterator(const Table* table);
+
+    bool Valid() const;
+    const Status& status() const { return status_; }
+
+    void SeekToFirst();
+    void Next();
+
+    // REQUIRES: Valid()
+    std::string_view key() const;
+    // REQUIRES: Valid()
+    std::string_view value() const;
+
+   private:
+    // Load data block for current index_iter_ position; position data_iter_
+    // at first entry. Leaves Valid() false on empty/exhaust/error.
+    void InitDataBlock();
+
+    const Table* table_;
+    Status status_;
+    Block::Iterator index_iter_;
+    std::unique_ptr<Block> data_block_;
+    std::unique_ptr<Block::Iterator> data_iter_;
+  };
+
+  Iterator NewIterator() const { return Iterator(this); }
+
   const Footer& footer() const { return footer_; }
   uint64_t file_size() const { return file_size_; }
 
