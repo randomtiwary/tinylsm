@@ -261,6 +261,19 @@ class PosixEnv final : public Env {
     return Status::OK();
   }
 
+  Status NewAppendableFile(const std::string& fname,
+                           std::unique_ptr<WritableFile>* result) override {
+    // O_APPEND: MANIFEST after NewDB/Recover continues the same file.
+    const int fd =
+        ::open(fname.c_str(), O_APPEND | O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+      *result = nullptr;
+      return PosixError(fname, errno);
+    }
+    result->reset(new PosixWritableFile(fname, fd));
+    return Status::OK();
+  }
+
   Status NewSequentialFile(const std::string& fname,
                            std::unique_ptr<SequentialFile>* result) override {
     const int fd = ::open(fname.c_str(), O_RDONLY | O_CLOEXEC);

@@ -31,6 +31,8 @@ add_library(tinylsm STATIC
   src/table.cpp
   src/env_posix.cpp
   src/filename.cpp
+  src/version_edit.cpp
+  src/version_set.cpp
 )
 
 target_include_directories(tinylsm
