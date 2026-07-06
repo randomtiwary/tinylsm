@@ -42,10 +42,13 @@ tinylsm/
   CMakeLists.txt
   include/tinylsm/   # public headers
   src/               # library sources
+  docs/              # on-disk format freeze (see format.md)
   tests/             # (added in later PRs)
   README.md
   LICENSE
 ```
+
+**On-disk formats:** see [docs/format.md](docs/format.md) (WAL, SST/`TINYLSM1`, MANIFEST/CURRENT).
 
 ## License
 
