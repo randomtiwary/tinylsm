@@ -86,5 +86,6 @@ export TINYLSM_STRESS_THREADS=8
 export TINYLSM_STRESS_SECONDS=12
 ```
 
-TSan coverage for these tests lands in a later CI PR; the locking model above is
-what makes a clean TSan run possible without suppressions.
+TSan coverage: build with `-DTINYLSM_TSAN=ON` (see README) or the CI `tsan` job.
+The locking model above is what makes a clean TSan run possible without
+suppressions.

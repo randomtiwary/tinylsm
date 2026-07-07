@@ -50,6 +50,18 @@ target_compile_features(tinylsm PUBLIC cxx_std_17)
 find_package(Threads REQUIRED)
 target_link_libraries(tinylsm PUBLIC Threads::Threads)
 
+# ThreadSanitizer (GCC/Clang). Prefer a dedicated build dir, e.g.:
+#   cmake -S . -B build-tsan -DTINYLSM_TSAN=ON
+option(TINYLSM_TSAN "Build with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
+if(TINYLSM_TSAN)
+  if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    message(FATAL_ERROR "TINYLSM_TSAN requires GCC or Clang (got ${CMAKE_CXX_COMPILER_ID})")
+  endif()
+  # Apply to the library and all dependents (tests) so link uses the same flags.
+  target_compile_options(tinylsm PUBLIC -fsanitize=thread -g -O1)
+  target_link_options(tinylsm PUBLIC -fsanitize=thread)
+endif()
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
 else()
