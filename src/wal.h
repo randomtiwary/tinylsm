@@ -7,6 +7,8 @@
 //
 // Internal component (not part of the public installed API surface).
 
+#include "internal_key.h"
+
 #include "tinylsm/env.h"
 #include "tinylsm/status.h"
 
@@ -17,11 +19,7 @@
 
 namespace tinylsm {
 
-// Match internal-key type field (docs/format.md §3 / §4.2).
-constexpr uint8_t kTypeDeletion = 0;
-constexpr uint8_t kTypeValue = 1;
-
-using SequenceNumber = uint64_t;
+// ValueType / SequenceNumber / kType* come from internal_key.h (docs/format.md §3 / §4.2).
 
 // Encode a logical Put/Delete into a WAL payload (no physical frame).
 void EncodeWalPayload(SequenceNumber seq, uint8_t type, std::string_view key,
