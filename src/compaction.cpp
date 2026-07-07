@@ -194,7 +194,8 @@ Status DoCompactionWork(Env* env, const std::string& dbname,
     return s;
   }
 
-  TableBuilder builder(file.get(), options.block_size);
+  TableBuilder builder(file.get(), options.block_size,
+                       options.bloom_bits_per_key);
   std::string last_user_key;
   bool has_last_user = false;
   // Own copies of key/value when emitting (heap views invalidated by Next).

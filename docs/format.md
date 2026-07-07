@@ -247,7 +247,7 @@ offset from EOF-48:
 | ASCII / file bytes | `TINYLSM1` = `0x54 0x49 0x4E 0x59 0x4C 0x53 0x4D 0x31` |
 | LE `uint64_t` on LE host | Interpret those 8 bytes in **file order** (do **not** byte-swap the ASCII). Readers compare the 8-byte sequence to `"TINYLSM1"`. |
 
-**Bloom (later PR):** non-zero `filter_handle`; **same magic `TINYLSM1`**. Zero `filter_handle` means “no filter”. No format bump required for optional bloom.
+**Bloom (optional):** non-zero `filter_handle` points at a filter block whose `block_contents` are a whole-table Bloom bitmap over **user keys** (`bitmap… ‖ u8 num_probes`, LevelDB-style double hashing). **Same magic `TINYLSM1`**. Zero `filter_handle` means “no filter” (default; older tables still open). No format bump required for optional bloom. Enable with `Options::bloom_bits_per_key` (e.g. 10).
 
 ### 5.5 Block size policy
 

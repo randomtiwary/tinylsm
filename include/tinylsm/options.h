@@ -32,7 +32,8 @@ struct Options {
   // Default durability policy for educational mode (WriteOptions.sync default).
   bool sync_writes = true;
 
-  // 0 = bloom disabled (later PRs).
+  // Bloom filter bits per user key in SST filter blocks.
+  // 0 = disabled (default; filter_handle stays 0,0). Typical enable value: 10.
   int bloom_bits_per_key = 0;
 
   // Filesystem abstraction; nullptr means Env::Default().

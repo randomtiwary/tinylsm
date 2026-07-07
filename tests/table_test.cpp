@@ -434,3 +434,86 @@ TEST_F(TableTest, AbandonDoesNotRequireFinish) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Optional bloom filter (filter_handle non-zero)
+// ---------------------------------------------------------------------------
+
+TEST_F(TableTest, BloomEnabledNoFalseNegativesAndMisses) {
+  const std::string path = Path("bloom.sst");
+  std::vector<std::pair<std::string, std::string>> kvs;
+  for (int i = 0; i < 50; ++i) {
+    char ukey[16];
+    std::snprintf(ukey, sizeof(ukey), "bk%03d", i);
+    kvs.emplace_back(IKey(ukey, 1), std::string("v-") + ukey);
+  }
+
+  std::unique_ptr<WritableFile> w;
+  ASSERT_TRUE(env_->NewWritableFile(path, &w).ok());
+  // bits_per_key=10 enables filter block.
+  TableBuilder builder(w.get(), /*block_size=*/64, /*bloom_bits_per_key=*/10);
+  for (const auto& kv : kvs) {
+    builder.Add(kv.first, kv.second);
+  }
+  TableBuildStats stats;
+  ASSERT_TRUE(builder.Finish(&stats).ok());
+  ASSERT_TRUE(w->Close().ok());
+
+  std::unique_ptr<RandomAccessFile> file;
+  std::unique_ptr<Table> table;
+  ASSERT_TRUE(OpenTable(path, &table, &file).ok());
+
+  // Filter present and non-empty.
+  EXPECT_NE(table->footer().filter_handle.offset, 0u);
+  EXPECT_NE(table->footer().filter_handle.size, 0u);
+  EXPECT_TRUE(table->has_filter());
+  EXPECT_FALSE(table->filter().empty());
+
+  std::string value;
+  for (int i = 0; i < 50; ++i) {
+    char ukey[16];
+    std::snprintf(ukey, sizeof(ukey), "bk%03d", i);
+    ASSERT_TRUE(table->Get(ukey, 1, &value).ok()) << ukey;
+    EXPECT_EQ(value, std::string("v-") + ukey);
+  }
+
+  // Absent keys must not return a value (bloom may short-circuit or fall through).
+  EXPECT_TRUE(table->Get("zz-missing", 1, &value).IsNotFound());
+  EXPECT_TRUE(table->Get("aa-missing", 1, &value).IsNotFound());
+  EXPECT_TRUE(table->Get("bk999", 1, &value).IsNotFound());
+}
+
+TEST_F(TableTest, BloomDisabledKeepsZeroFilterHandle) {
+  const std::string path = Path("nobloom.sst");
+  TableBuildStats stats;
+  ASSERT_TRUE(BuildTable(path, {{IKey("k"), "v"}}, &stats).ok());
+
+  std::unique_ptr<RandomAccessFile> file;
+  std::unique_ptr<Table> table;
+  ASSERT_TRUE(OpenTable(path, &table, &file).ok());
+  EXPECT_EQ(table->footer().filter_handle.offset, 0u);
+  EXPECT_EQ(table->footer().filter_handle.size, 0u);
+  EXPECT_FALSE(table->has_filter());
+  EXPECT_TRUE(table->filter().empty());
+
+  std::string value;
+  ASSERT_TRUE(table->Get("k", 1, &value).ok());
+  EXPECT_EQ(value, "v");
+}
+
+TEST_F(TableTest, BloomEmptyTableHasNoFilterBlock) {
+  // No user keys → filter_handle stays zero even if bloom requested.
+  const std::string path = Path("empty-bloom.sst");
+  std::unique_ptr<WritableFile> w;
+  ASSERT_TRUE(env_->NewWritableFile(path, &w).ok());
+  TableBuilder builder(w.get(), 4096, /*bloom_bits_per_key=*/10);
+  TableBuildStats stats;
+  ASSERT_TRUE(builder.Finish(&stats).ok());
+  ASSERT_TRUE(w->Close().ok());
+
+  std::unique_ptr<RandomAccessFile> file;
+  std::unique_ptr<Table> table;
+  ASSERT_TRUE(OpenTable(path, &table, &file).ok());
+  EXPECT_EQ(table->footer().filter_handle.offset, 0u);
+  EXPECT_EQ(table->footer().filter_handle.size, 0u);
+}

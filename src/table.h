@@ -20,6 +20,7 @@ class Table {
  public:
   // Open an existing SST. *file is not owned and must outlive the Table.
   // file_size must be the full size of the file (needed to locate the footer).
+  // When filter_handle is non-zero, loads the bloom filter block into memory.
   static Status Open(RandomAccessFile* file, uint64_t file_size,
                      std::unique_ptr<Table>* table);
 
@@ -31,6 +32,8 @@ class Table {
   //           *s is OK (value) or NotFound (deletion tombstone — stop older files).
   //   false — user key not present in this file (*s is NotFound, or error in *s).
   // On Corruption/IO error: returns true with *s set so callers stop the search.
+  // When a bloom filter is present and KeyMayMatch is false, skips the data
+  // block read and returns false (definitely not present).
   bool Get(std::string_view internal_key, std::string* value, Status* s) const;
 
   // Convenience wrappers that collapse to a single Status (tests / simple callers).
@@ -76,9 +79,16 @@ class Table {
   const Footer& footer() const { return footer_; }
   uint64_t file_size() const { return file_size_; }
 
+  // Empty when no filter (handle 0,0). Bloom block_contents only (no trailer).
+  const std::string& filter() const { return filter_; }
+  bool has_filter() const {
+    return footer_.filter_handle.size != 0 ||
+           footer_.filter_handle.offset != 0;
+  }
+
  private:
   Table(RandomAccessFile* file, uint64_t file_size, Footer footer,
-        Block index_block);
+        Block index_block, std::string filter);
 
   // Read handle.size contents + 5-byte trailer; verify CRC; return Block.
   Status ReadBlock(const BlockHandle& handle, Block* out) const;
@@ -87,6 +97,7 @@ class Table {
   uint64_t file_size_;
   Footer footer_;
   Block index_block_;
+  std::string filter_;  // bloom block_contents; empty if off
   InternalKeyComparator icmp_;
 };
 

@@ -1,0 +1,2 @@
+add_executable(simple_put_get simple_put_get.cpp)
+target_link_libraries(simple_put_get PRIVATE tinylsm)

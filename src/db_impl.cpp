@@ -748,7 +748,8 @@ Status DBImpl::WriteLevel0Table(MemTable* imm, FileMetaData* meta) {
     return s;
   }
 
-  TableBuilder builder(file.get(), options_.block_size);
+  TableBuilder builder(file.get(), options_.block_size,
+                       options_.bloom_bits_per_key);
   {
     MemTable::Iterator it(imm);
     it.SeekToFirst();
