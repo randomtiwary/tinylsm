@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(tinylsm VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -33,3 +33,13 @@ target_include_directories(tinylsm
 )
 
 target_compile_features(tinylsm PUBLIC cxx_std_17)
+
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" ON)
+else()
+  option(TINYLSM_BUILD_TESTS "Build tinylsm unit tests" OFF)
+endif()
+if(TINYLSM_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

@@ -26,14 +26,20 @@ an explicit focus on **correctness, clarity, and small reviewable changes**.
 
 ## Build
 
-Requires **CMake 3.16+** and a **C++17** compiler.
+Requires **CMake 3.20+** and a **C++17** compiler.
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-This produces a static library target `tinylsm`.
+This produces a static library target `tinylsm`. Unit tests are built by default
+when tinylsm is the top-level project (`TINYLSM_BUILD_TESTS`; pass
+`-DTINYLSM_BUILD_TESTS=OFF` to skip).
+
+```bash
+ctest --test-dir build --output-on-failure
+```
 
 ## Layout
 
@@ -42,10 +48,12 @@ tinylsm/
   CMakeLists.txt
   include/tinylsm/   # public headers
   src/               # library sources
-  tests/             # (added in later PRs)
+  tests/             # GoogleTest smoke / unit tests
+  .github/workflows/ # CI (build + ctest on Ubuntu)
   README.md
   LICENSE
 ```
+
 
 ## License
 
