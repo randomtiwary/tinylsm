@@ -26,7 +26,7 @@ an explicit focus on **correctness, clarity, and small reviewable changes**.
 
 ## Build
 
-Requires **CMake 3.16+** and a **C++17** compiler.
+Requires **CMake 3.20+** and a **C++17** compiler.
 
 ```bash
 cmake -S . -B build
@@ -38,10 +38,7 @@ when tinylsm is the top-level project (`TINYLSM_BUILD_TESTS`; pass
 `-DTINYLSM_BUILD_TESTS=OFF` to skip).
 
 ```bash
-# CMake 3.20+:
 ctest --test-dir build --output-on-failure
-# CMake 3.16–3.19:
-cd build && ctest --output-on-failure
 ```
 
 ## Layout
