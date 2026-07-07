@@ -90,6 +90,10 @@ class Env {
   virtual Status NewWritableFile(const std::string& fname,
                                  std::unique_ptr<WritableFile>* result) = 0;
 
+  // Open fname for append (create if missing). Used for MANIFEST after recover.
+  virtual Status NewAppendableFile(const std::string& fname,
+                                   std::unique_ptr<WritableFile>* result) = 0;
+
   // Open existing file for sequential reads from offset 0.
   virtual Status NewSequentialFile(const std::string& fname,
                                    std::unique_ptr<SequentialFile>* result) = 0;
