@@ -20,6 +20,7 @@ configure_file(
 add_library(tinylsm STATIC
   src/block.cpp
   src/block_builder.cpp
+  src/compaction.cpp
   src/crc32c.cpp
   src/db_impl.cpp
   src/env_posix.cpp
