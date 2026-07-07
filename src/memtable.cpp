@@ -83,7 +83,7 @@ void MemTable::Add(SequenceNumber sequence, ValueType type,
   table_.Insert(buf);
 }
 
-Status MemTable::Get(const LookupKey& lkey, std::string* value) const {
+bool MemTable::Get(const LookupKey& lkey, std::string* value, Status* s) const {
   // Seek using a temporary entry encoding of the lookup internal key.
   // Comparator only inspects the length-prefixed internal key.
   std::string seek_key;
@@ -92,24 +92,31 @@ Status MemTable::Get(const LookupKey& lkey, std::string* value) const {
   Table::Iterator iter(&table_);
   iter.Seek(seek_key.data());
   if (!iter.Valid()) {
-    return Status::NotFound(std::string());
+    *s = Status::NotFound(std::string());
+    return false;  // absent — allow fall-through
   }
 
   const std::string_view found_ikey = GetLengthPrefixedInternalKey(iter.key());
   if (ExtractUserKey(found_ikey) != lkey.user_key()) {
-    return Status::NotFound(std::string());
+    *s = Status::NotFound(std::string());
+    return false;  // different user key — allow fall-through
   }
 
+  // Found an entry for this user key: stop layered search either way.
   switch (ExtractValueType(found_ikey)) {
     case kTypeValue: {
       const std::string_view v = GetLengthPrefixedValue(iter.key());
       value->assign(v.data(), v.size());
-      return Status::OK();
+      *s = Status::OK();
+      return true;
     }
     case kTypeDeletion:
-      return Status::NotFound(std::string());
+      // Tombstone: NotFound to caller, but true so we do not resurrect SST values.
+      *s = Status::NotFound(std::string());
+      return true;
   }
-  return Status::NotFound(std::string());
+  *s = Status::NotFound(std::string());
+  return false;
 }
 
 MemTable::Iterator::Iterator(const MemTable* table)

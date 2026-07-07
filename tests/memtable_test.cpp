@@ -82,7 +82,9 @@ TEST(MemTableTest, EmptyGetNotFound) {
   MemTable table(cmp);
   LookupKey lkey("missing", 100);
   std::string value;
-  Status s = table.Get(lkey, &value);
+  Status s;
+  // Absent: false so layered Get may fall through to older layers.
+  EXPECT_FALSE(table.Get(lkey, &value, &s));
   EXPECT_TRUE(s.IsNotFound());
 }
 
@@ -93,23 +95,26 @@ TEST(MemTableTest, PutAndGet) {
   table.Add(2, kTypeValue, "baz", "qux");
 
   std::string value;
-  Status s = table.Get(LookupKey("foo", 100), &value);
+  Status s;
+  ASSERT_TRUE(table.Get(LookupKey("foo", 100), &value, &s));
   ASSERT_TRUE(s.ok()) << s.ToString();
   EXPECT_EQ(value, "bar");
 
-  s = table.Get(LookupKey("baz", 100), &value);
+  ASSERT_TRUE(table.Get(LookupKey("baz", 100), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "qux");
 }
 
-TEST(MemTableTest, DeleteIsNotFound) {
+TEST(MemTableTest, DeleteIsNotFoundButStopsLayerSearch) {
   InternalKeyComparator cmp;
   MemTable table(cmp);
   table.Add(1, kTypeValue, "k", "v");
   table.Add(2, kTypeDeletion, "k", "");
 
   std::string value = "stale";
-  Status s = table.Get(LookupKey("k", 100), &value);
+  Status s;
+  // Tombstone: true + NotFound — DBImpl must not fall through to SST.
+  ASSERT_TRUE(table.Get(LookupKey("k", 100), &value, &s));
   EXPECT_TRUE(s.IsNotFound());
 }
 
@@ -120,18 +125,19 @@ TEST(MemTableTest, OverwriteByHigherSequence) {
   table.Add(5, kTypeValue, "k", "new");
 
   std::string value;
+  Status s;
   // Snapshot at seq 100 sees the newest entry (seq 5).
-  Status s = table.Get(LookupKey("k", 100), &value);
+  ASSERT_TRUE(table.Get(LookupKey("k", 100), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "new");
 
   // Snapshot at seq 3 sees only seq 1 (seq 5 is newer than snapshot).
-  s = table.Get(LookupKey("k", 3), &value);
+  ASSERT_TRUE(table.Get(LookupKey("k", 3), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "old");
 
   // Snapshot at seq 1 sees seq 1.
-  s = table.Get(LookupKey("k", 1), &value);
+  ASSERT_TRUE(table.Get(LookupKey("k", 1), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "old");
 }
@@ -142,7 +148,8 @@ TEST(MemTableTest, SnapshotDoesNotSeeFutureWrites) {
   table.Add(10, kTypeValue, "k", "future");
 
   std::string value;
-  Status s = table.Get(LookupKey("k", 5), &value);
+  Status s;
+  EXPECT_FALSE(table.Get(LookupKey("k", 5), &value, &s));
   EXPECT_TRUE(s.IsNotFound());
 }
 
@@ -154,14 +161,15 @@ TEST(MemTableTest, DeleteThenPutVisibleAgain) {
   table.Add(3, kTypeValue, "k", "v2");
 
   std::string value;
-  Status s = table.Get(LookupKey("k", 100), &value);
+  Status s;
+  ASSERT_TRUE(table.Get(LookupKey("k", 100), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "v2");
 
-  s = table.Get(LookupKey("k", 2), &value);
+  ASSERT_TRUE(table.Get(LookupKey("k", 2), &value, &s));
   EXPECT_TRUE(s.IsNotFound());
 
-  s = table.Get(LookupKey("k", 1), &value);
+  ASSERT_TRUE(table.Get(LookupKey("k", 1), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_EQ(value, "v1");
 }
@@ -239,7 +247,8 @@ TEST(MemTableTest, EmptyValue) {
   MemTable table(cmp);
   table.Add(1, kTypeValue, "empty", "");
   std::string value = "not-empty";
-  Status s = table.Get(LookupKey("empty", 1), &value);
+  Status s;
+  ASSERT_TRUE(table.Get(LookupKey("empty", 1), &value, &s));
   ASSERT_TRUE(s.ok());
   EXPECT_TRUE(value.empty());
 }
